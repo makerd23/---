@@ -1,0 +1,4 @@
+# Conservative package set for Python 3.9-3.12, Windows x64.
+mss==10.2.0
+numpy==1.26.4
+opencv-python==4.10.0.84
