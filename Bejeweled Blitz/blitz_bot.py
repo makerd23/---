@@ -4,75 +4,21 @@ import argparse
 import ctypes
 from ctypes import wintypes
 import logging
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import time
 
-import cv2
-import mss
-import numpy as np
+from native_pixels import Capture, read_image
+from gem_vision import read_board, read_flames, countdown_visible, timer_active, find_board
 
 
 SIZE = 8
-COLORS = "ROYGBPW"
+COLORS = (1, 2, 3, 4, 5, 6, 7)
 F2, F8 = 0x71, 0x77
 LOG = logging.getLogger(__name__)
 LOG_PATH = Path(__file__).with_name("blitz-last-run.log")
-
-
-def read_board(frame):
-    hsv = cv2.cvtColor(cv2.resize(frame, (256, 256)), cv2.COLOR_BGR2HSV)
-    tiles = hsv.reshape(8, 32, 8, 32, 3).transpose(0, 2, 1, 3, 4)
-    hue, sat, value = tiles[:, :, 7:25, 7:25, :].transpose(4, 0, 1, 2, 3)
-    bright = (sat >= 100) & (value >= 95)
-    masks = (
-        bright & ((hue <= 8) | (hue >= 172)),
-        bright & (hue >= 9) & (hue <= 21),
-        bright & (hue >= 22) & (hue <= 38),
-        bright & (hue >= 39) & (hue <= 82),
-        bright & (hue >= 83) & (hue <= 125),
-        bright & (hue >= 126) & (hue <= 171),
-        (sat <= 80) & (value >= 145),
-    )
-    counts = np.stack([mask.sum(axis=(2, 3)) for mask in masks])
-    ranked = np.sort(counts, axis=0)
-    clear = (ranked[-1] >= 100) & (ranked[-1] - ranked[-2] >= 55)
-    return tuple(
-        tuple(COLORS[color] if valid else None for color, valid in zip(row, good))
-        for row, good in zip(counts.argmax(axis=0), clear)
-    )
-
-
-def countdown_visible(frame):
-    height, width = frame.shape[:2]
-    middle = frame[3 * height // 8:5 * height // 8, width // 3:2 * width // 3]
-    blue, green, red = middle.transpose(2, 0, 1)
-    return np.mean((green >= 250) & (blue <= 4) & (red <= 4)) > 0.035
-
-
-def timer_mask(frame):
-    hue, sat, value = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).transpose(2, 0, 1)
-    return (hue >= 83) & (hue <= 107) & (sat >= 100) & (value >= 100)
-
-
-def find_board(frame):
-    # At the start of a round the filled bar spans almost the entire grid.
-    mask = timer_mask(frame).astype(np.uint8)
-    _, _, components, _ = cv2.connectedComponentsWithStats(mask)
-    for x, y, length, thickness, area in sorted(components[1:], key=lambda item: item[2], reverse=True):
-        if length < 150 or not 14 * thickness <= length <= 29 * thickness:
-            continue
-        if area < 0.7 * length * thickness:
-            continue
-        side = round(length * 1.013)
-        left = int(x) - round(side * 0.008)
-        top = int(y) - round(side * 0.018) - side
-        if left < 0 or top < 0 or left + side > frame.shape[1]:
-            continue
-        board_frame = frame[top:top + side, left:left + side]
-        gems = [gem for row in read_board(board_frame) for gem in row if gem is not None]
-        if len(gems) >= 60 and len(set(gems)) >= 5:
-            return left, top, side, side
-    return None
 
 
 def runs(board):
@@ -115,9 +61,9 @@ def predict_value(board, matches, can_predict_cascades):
     return value
 
 
-def best_move(board):
+def best_move(board, flames=frozenset()):
     best = None
-    best_value = 0
+    best_value = (-1, -1)
     complete = all(None not in row for row in board)
     for row in range(SIZE):
         for col in range(SIZE):
@@ -132,7 +78,14 @@ def best_move(board):
                 matches = runs(trial)
                 if not any((row, col) in run or (r, c) in run for run in matches):
                     continue
-                value = predict_value(trial, matches, complete)
+                source_cell, target_cell = (row, col), (r, c)
+                moved_flames = {
+                    target_cell if cell == source_cell else source_cell if cell == target_cell else cell
+                    for cell in flames
+                }
+                triggered = len(set.union(*matches) & moved_flames)
+                # Explosion outcomes need new screen evidence, so avoid predicting their cascades.
+                value = (triggered, predict_value(trial, matches, complete and not triggered))
                 if value > best_value:
                     best = ((row, col), (r, c))
                     best_value = value
@@ -146,6 +99,9 @@ class Windows:
         self.user.GetForegroundWindow.restype = wintypes.HWND
         self.user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
         self.user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        self.user.SetForegroundWindow.argtypes = [wintypes.HWND]
+        self.user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        self.user.IsWindowVisible.argtypes = [wintypes.HWND]
         self.user.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
         self.user.GetAsyncKeyState.argtypes = [ctypes.c_int]
         self.user.GetAsyncKeyState.restype = ctypes.c_short
@@ -180,6 +136,60 @@ class Windows:
         if "bejeweled blitz" not in title.value.lower() or "chrome" not in title.value.lower():
             return None
         return window
+
+    def find_game_window(self):
+        found = []
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def visit(window, parameter):
+            title = ctypes.create_unicode_buffer(512)
+            self.user.GetWindowTextW(window, title, len(title))
+            text = title.value.lower()
+            if self.user.IsWindowVisible(window) and "bejeweled blitz" in text and "chrome" in text:
+                found.append(window)
+            return True
+        callback = callback_type(visit)
+        self.user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        self.user.EnumWindows(callback, 0)
+        return found[0] if found else None
+
+    def open_game(self):
+        window = self.find_game_window()
+        if window is None:
+            candidates = [shutil.which("chrome")]
+            for base in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+                candidates.append(str(Path(os.environ.get(base, "")) / "Google/Chrome/Application/chrome.exe"))
+            executable = next((p for p in candidates if p and Path(p).is_file()), None)
+            if executable is None:
+                raise ValueError("找不到 Google Chrome，請先在 Chrome 開啟 Bejeweled Blitz。")
+            subprocess.Popen(
+                [executable, "--new-window", "--start-maximized", "https://apps.facebook.com/bejeweledblitz"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        LOG.info("正在等待 Chrome 遊戲頁面。若 Facebook 要求登入，請完成登入。")
+        deadline = time.monotonic() + 120
+        while window is None and time.monotonic() < deadline:
+            self.check()
+            window = self.find_game_window()
+            time.sleep(0.1)
+        if window is None:
+            raise ValueError("兩分鐘內未找到遊戲頁面，請確認已登入 Facebook。")
+        self.user.ShowWindow(window, 3)
+        self.user.SetForegroundWindow(window)
+        return window
+
+    def click(self, window, point):
+        self.check()
+        if self.game_window() != window:
+            return False
+        self.move_cursor(point)
+        if self.game_window() != window:
+            return False
+        self.user.mouse_event(0x0002, 0, 0, 0, 0)
+        try:
+            time.sleep(0.06)
+        finally:
+            self.user.mouse_event(0x0004, 0, 0, 0, 0)
+        return True
 
     def cursor(self):
         point = wintypes.POINT()
@@ -224,9 +234,10 @@ class Windows:
         return True
 
 
-def print_board(board):
-    for row in board:
-        print(" ".join(color or "?" for color in row))
+def print_board(board, flames=frozenset()):
+    for r, row in enumerate(board):
+        print(" ".join(str(color or 0) + ("F" if (r, c) in flames else " ")
+                       for c, color in enumerate(row)))
 
 
 def describe(move):
@@ -261,12 +272,13 @@ def play(dry_run, manual=False):
     started = time.monotonic()
     deadline = started + 30
     previous = last_move_board = None
+    previous_flames = set()
     moves = 0
     idle_since = started
     last_timer_seen = None
     away = False
     region = None
-    with mss.MSS() as capture:
+    with Capture() as capture:
         while time.monotonic() < deadline:
             win.check()
             if win.game_window() != window:
@@ -282,7 +294,7 @@ def play(dry_run, manual=False):
                 idle_since = time.monotonic()
             if bounds is None:
                 search = win.window_region(window, capture.monitors[0])
-                screen = np.asarray(capture.grab(search))[:, :, :3]
+                screen = capture.grab(search)
                 location = find_board(screen)
                 if location is None:
                     time.sleep(0.08)
@@ -295,11 +307,11 @@ def play(dry_run, manual=False):
                 region = dict(left=left, top=top, width=width, height=height + round(height * 0.065))
                 bar_start = height + round(height * 0.024)
                 bar_end = height + round(height * 0.056)
-            frame = np.asarray(capture.grab(region))[:, :, :3]
-            board_frame = frame[:height]
+            frame = capture.grab(region)
+            board_frame = frame.crop(0, 0, width, height)
             now = time.monotonic()
             # Sample the left end of the bar, which stays filled until late in the round.
-            if timer_mask(frame[bar_start:bar_end, width // 80:width // 25]).mean() > 0.25:
+            if timer_active(frame.crop(width // 80, bar_start, width // 25 - width // 80, bar_end - bar_start)):
                 if last_timer_seen is None:
                     LOG.info("已偵測到時間條。")
                     deadline = now + 63
@@ -316,13 +328,16 @@ def play(dry_run, manual=False):
                 time.sleep(0.03)
                 continue
             board = read_board(board_frame)
+            flames = read_flames(board_frame, board)
+            confirmed_flames = flames & previous_flames
+            previous_flames = flames
             unknown = sum(row.count(None) for row in board)
             readable = unknown <= 2 and not runs(board)
             if readable and board == previous and board != last_move_board:
-                move = best_move(board)
+                move = best_move(board, confirmed_flames)
                 if move is not None:
                     if dry_run:
-                        print_board(board)
+                        print_board(board, confirmed_flames)
                         print(f"建議交換 {describe(move)}", flush=True)
                     else:
                         points = [
@@ -333,7 +348,7 @@ def play(dry_run, manual=False):
                             previous = None
                             continue
                         moves += 1
-                        LOG.debug("第 %d 次交換 %s", moves, describe(move))
+                        LOG.debug("第 %d 次交換 %s；火焰格 %s；編號棋盤 %s", moves, describe(move), sorted(confirmed_flames), board)
                     last_move_board = board
                     idle_since = time.monotonic()
             previous = board if readable else None
@@ -374,21 +389,22 @@ def main():
     if args.inspect:
         if not args.board:
             parser.error("--inspect 需要 --board X Y W H")
-        image = cv2.imdecode(np.fromfile(args.inspect, np.uint8), cv2.IMREAD_COLOR)
+        image = read_image(args.inspect)
         x, y, width, height = args.board
-        if image is None or min(x, y) < 0 or min(width, height) < 8 or (
-            x + width > image.shape[1] or y + height > image.shape[0]
+        if min(x, y) < 0 or min(width, height) < 8 or (
+            x + width > image.width or y + height > image.height
         ):
             parser.error("截圖或棋盤範圍無效")
-        frame = image[y:y + height, x:x + width]
+        frame = image.crop(x, y, width, height)
         board = read_board(frame)
-        print_board(board)
+        flames = read_flames(frame, board)
+        print_board(board, flames)
         if countdown_visible(frame):
             print("開局倒數遮住棋盤，略過走法。")
         elif any(None in row for row in board) or runs(board):
             print("棋盤尚未辨識完整或有寶石正在消除。")
         else:
-            move = best_move(board)
+            move = best_move(board, flames)
             print(f"建議交換 {describe(move)}" if move else "沒有找到合法交換。")
         return 0
     configure_log()
