@@ -5,12 +5,12 @@ cd /d "%~dp0"
 if exist ".venv\Scripts\python.exe" goto local
 py -3 --version >nul 2>&1
 if not errorlevel 1 (
-  py -3 dino_bot.py %*
+  py -3 auto_dino.py %*
   goto done
 )
-python dino_bot.py %*
+python auto_dino.py %*
 goto done
 :local
-".venv\Scripts\python.exe" dino_bot.py %*
+".venv\Scripts\python.exe" auto_dino.py %*
 :done
 pause

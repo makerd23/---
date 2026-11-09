@@ -1,42 +1,36 @@
-# 小恐龍自動跳躍：純 Python 區塊偵測版
+# 小恐龍全自動版
 
-預設 dino_bot.py 只用 Python 內建模組與 Windows API。不需要 pip、Chrome 外掛、OpenCV、NumPy 或 MSS。使用矩形區塊偵測，區塊內讀到障礙物就跳躍，不會蹲下。
+雙擊 start.cmd，或在 IDLE 開啟 auto_dino.py 後按 F5。程式自動尋找 Chrome、以全螢幕開啟獨立遊戲視窗、開始遊戲與跳躍；碰撞後自動重開。F8 或 Ctrl+C 停止，並關閉本程式的 Chrome 視窗。
 
-## 開始
+## 帶到老師電腦
 
-1. 在 Chrome 開啟 chrome://dino，先不要開始，使用預設縮放。
-2. 雙擊 start.cmd，或在終端機執行 python dino_bot.py。也可用 IDLE 開啟程式後按 F5。
-3. 切回 Chrome，將滑鼠放在恐龍前方區塊的左上角，按 F9；再移到右下角，按 F9。建議區塊寬 30–50、高 50–55 像素，右緣距恐龍右側約 100 像素，下緣離地 5–10 像素。不要包含恐龍、地面、文字或雲。
-4. 移開滑鼠，再按 F9 開始。現在總共需要按三次 F9。
-5. F8 或終端機 Ctrl+C 停止。切換前景視窗也會停止。筆電可能需要 Fn 搭配功能鍵。
+只需 auto_dino.py、start.cmd 與這份 README.md。電腦需有 Windows、Python 3 與 Google Chrome；不需要 pip 套件、ChromeDriver 或座標校準。從 GitHub 下載 ZIP 後先解壓縮再啟動。不要複製 .venv。本機使用 Python 3.12 驗證，尚未在老師電腦測試。
 
-不會出現框選視窗。每次啟動重新記錄座標；移動或縮放 Chrome 後也要重新執行。
+若找不到 Chrome：python auto_dino.py --chrome "C:\Program Files\Google\Chrome\Application\chrome.exe"
 
-## 加速追蹤與調整
+## 實作方式與限制
 
-每輪用 BitBlt 擷取一小塊畫面，再在記憶體讀取像素。從區塊右緣再往右掃描 200 像素以估速，以障礙物左邊緣位移估速。速度增加時自動增加提前距離，最多 160 像素。只讀取螢幕，不讀遊戲內部資料，也不修改碰撞或分數。
+Python 透過僅在本機監聽的 Chrome DevTools Protocol，讀取遊戲障礙物與速度，判斷時機後呼叫遊戲跳躍動作。這是讀取遊戲內部資料的版本，不是畫面像素辨識。沒有修改碰撞判定、速度或分數；仍可能撞到障礙物。若老師要求只能辨識畫面，請使用保留的 dino_bot.py 舊版。
 
-- 顯示估速與提前距離：python dino_bot.py --debug。
-- 從一開始就跳太晚／太早：重新執行，將座標往右／左調 10–20 像素。
-- 加速後跳太晚：可試 python dino_bot.py --lead 0.28；預設 0.22。
-- 調整空白鍵按住時間：python dino_bot.py --hold 0.22；預設 0.18 秒。
+啟動時建立獨立暫存 Chrome 設定資料夾，不使用個人登入資料；結束時清理自己的暫存資料。學校政策若停用偵錯或小恐龍，程式會停止報錯。Chrome 未來改變內部介面時可能需修正。
 
-區塊每隔 4 像素取樣一欄、每隔 3 像素取樣一列，涵蓋中間高度而非只讀兩條線；極細或剛好落在取樣間隙的物體仍可能漏掉。所有障礙物均用跳躍處理，尚未驗證各種飛鳥高度的通過率。像素估速可能受背景、縮放與畫面延遲影響，不會自動重開，不保證分數。以上參數仍待實際遊戲調校。
+跳太晚可試 python auto_dino.py --lead 0.14；預設 0.12。測試指定時間：python auto_dino.py --seconds 20。請保持遊戲視窗可見，避免背景節流。
 
 ## 驗證
 
-python -S -m unittest -v test_coordinate
+本機已成功自動啟動遊戲並讀到距離增加。未驗證老師電腦相容性或高分表現，不保證排名。
 
-測試包含加速提前、丟失配對、邊界裁切、日夜像素、移動障礙物與跳躍冷卻。已通過離線測試與語法檢查，尚未驗證此版遊戲成績或學校電腦效能。
+## 舊版
 
-## GitHub 與學校電腦
+dino_bot.py 保留純 Python 畫面區塊偵測，需 F9 記錄左上、右下，再按 F9 開始。其他 vision、requirements、test_coordinate 檔案屬於舊版，自動版不需要。
 
-目前尚未上傳 GitHub。預設版本只需 dino_bot.py、start.cmd、README.md，可附 test_coordinate.py。從 GitHub 選 Code → Download ZIP，解壓縮後執行；需要 Windows 與可用的 Python 3。本機檢查使用 Python 3.12，其他版本未逐一實測。
+## 來源
 
-不要上傳或複製 .venv、__pycache__、calibration.json。setup.cmd 只顯示操作提示，不會安裝套件。舊影像版保留在 dino_vision.py；requirements.txt、requirements-school.txt、check_environment.py、test_vision.py 都是舊版用的檔案，區塊版不需要。
+Chromium 遊戲原始碼：https://raw.githubusercontent.com/chromium/chromium/main/components/neterror/resources/dino_game/offline.ts
 
-## API 來源
+全螢幕使用 Chrome 的 --start-fullscreen 啟動參數。可按 F11 切換全螢幕，F8 停止程式。
 
-- 像素讀取：https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-getpixel
-- 小區域擷取：https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-bitblt
-- 滑鼠座標：https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getcursorpos
+2026-11-09 修正：實測發現原 0.22 秒提前量讓恐龍下降時仍碰到寬仙人掌，預設改為 0.12 秒。--debug 可輸出跳躍和碰撞當下的障礙物、速度與恐龍高度。
+修正後本機全螢幕實測 60 秒：未出現碰撞，經過寬仙人掌與三種高度飛鳥，遊戲內部速度達約 13。這是單次測試結果，不保證其他電腦或長時間不失敗。
+
+飛鳥分級：高飛鳥不跳、中飛鳥蹲下，直到整隻鳥通過才站起來；低飛鳥與仙人掌跳躍。分類使用遊戲提供的鳥高度陣列，不受螢幕解析度影響。python -S -m unittest -v test_auto 可測試五項判斷情境。
