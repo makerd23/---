@@ -156,9 +156,12 @@ def decide_action(state, lead):
     return action if distance <= state['speed']*60*seconds else 'run'
 
 
-def prepare_window(connection):
+def prepare_window(connection, maximize=True):
+    if not maximize:
+        connection.call('Page.bringToFront')
+        return
     window = connection.call('Browser.getWindowForTarget')['windowId']
-    for mode in ('fullscreen', 'maximized'):
+    for mode in ('maximized',):
         try:
             current = connection.call('Browser.getWindowBounds', windowId=window)['bounds']
             if current.get('windowState') != mode:
@@ -176,7 +179,7 @@ def prepare_window(connection):
                 time.sleep(.1)
         except RuntimeError:
             continue
-    print('此電腦未接受全螢幕或最大化指令，將以目前大小執行。', flush=True)
+    print('此電腦未接受最大化指令，將以目前大小執行。', flush=True)
     connection.call('Page.bringToFront')
 
 
@@ -224,6 +227,7 @@ def main(argv=None):
     parser.add_argument('--lead', type=float, default=.12, help='跳躍提前秒數（預設 0.12）')
     parser.add_argument('--seconds', type=float, default=0, help='測試時間，0 表示持續執行')
     parser.add_argument('--debug', action='store_true', help='記錄跳躍與碰撞狀態')
+    parser.add_argument('--windowed', action='store_true', help='一般大小視窗，不最大化')
     args = parser.parse_args(argv)
     if not .05 <= args.lead <= .5 or args.seconds < 0:
         parser.error('lead 需介於 0.05–0.5，seconds 不可為負數')
@@ -236,7 +240,8 @@ def main(argv=None):
         process = subprocess.Popen([chrome, '--user-data-dir='+str(profile),
             '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
             '--no-first-run', '--no-default-browser-check', '--new-window',
-            '--start-fullscreen', 'chrome://dino/'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            '--window-size=1000,650' if args.windowed else '--start-maximized',
+            'chrome://dino/'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         last_error = None
         deadline = time.monotonic()+25
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -262,7 +267,7 @@ def main(argv=None):
                 time.sleep(.3)
         if not connection:
             raise RuntimeError('25 秒內無法連接小恐龍；可能是 Chrome 版本或學校政策不允許遠端偵錯。原因：'+repr(last_error))
-        prepare_window(connection)
+        prepare_window(connection, maximize=not args.windowed)
         start_game(connection)
         print('已自動開始。不需選座標；由 Python 判斷跳躍。', flush=True)
         started = last_report = time.monotonic()
