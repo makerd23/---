@@ -36,3 +36,6 @@ Chromium 遊戲原始碼：https://raw.githubusercontent.com/chromium/chromium/m
 飛鳥分級：高飛鳥不跳、中飛鳥蹲下，直到整隻鳥通過才站起來；低飛鳥與仙人掌跳躍。分類使用遊戲提供的鳥高度陣列，不受螢幕解析度影響。python -S -m unittest -v test_auto 可測試五項判斷情境。
 
 教室啟動修正：連接後再次設定並確認全螢幕；失敗則嘗試最大化。啟用頁面焦點、自動點擊畫布與送出空白鍵，確認距離開始增加才進入控制迴圈。已在本機實測自動全螢幕啟動並運行 15 秒，教室電腦仍待驗證。更新時需將新版 auto_dino.py 複製到教室電腦，舊副本不會自行更新。
+
+也可單獨下載 [小恐龍自動遊玩.ipynb](小恐龍自動遊玩.ipynb)，在 Windows 本機 VS Code／Jupyter 選擇本機 Python 核心後按全部執行。筆記本已內嵌程式；執行環境本身需要 Jupyter／ipykernel。F8 或中斷核心停止。維護時執行 build_dino_notebook.py 可從 auto_dino.py 重新產生筆記本。
+

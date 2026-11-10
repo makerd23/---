@@ -218,13 +218,13 @@ def start_game(connection):
     raise RuntimeError('遊戲沒有開始移動；請提供終端機訊息以檢查此電腦的 Chrome 設定。')
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description='自動開啟 Chrome 並操作小恐龍，不需要安裝套件')
     parser.add_argument('--chrome', help='Chrome 執行檔路徑')
     parser.add_argument('--lead', type=float, default=.12, help='跳躍提前秒數（預設 0.12）')
     parser.add_argument('--seconds', type=float, default=0, help='測試時間，0 表示持續執行')
     parser.add_argument('--debug', action='store_true', help='記錄跳躍與碰撞狀態')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not .05 <= args.lead <= .5 or args.seconds < 0:
         parser.error('lead 需介於 0.05–0.5，seconds 不可為負數')
     chrome = find_chrome(args.chrome)
