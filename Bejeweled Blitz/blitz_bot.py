@@ -1,4 +1,4 @@
-"""Play a manually started Bejeweled Blitz round in Chrome on Windows."""
+"""Open Bejeweled Blitz in Chrome and play successive rounds on Windows."""
 
 import argparse
 import ctypes
@@ -12,6 +12,7 @@ import time
 
 from native_pixels import Capture, read_image
 from gem_vision import read_board, read_flames, countdown_visible, timer_active, find_board
+from menu_buttons import MenuButtons
 
 
 SIZE = 8
@@ -260,17 +261,21 @@ def calibrate(win):
     return window, (left, top, width, height)
 
 
-def play(dry_run, manual=False):
+def play(dry_run, manual=False, wait_key=False, window=None):
     win = Windows()
+    automatic = not (manual or wait_key or dry_run)
     if manual:
         window, bounds = calibrate(win)
-    else:
+    elif not automatic:
         LOG.info("切到 Chrome 的 Bejeweled Blitz，按一次 F2 待命，再用滑鼠開局。F8 停止。")
         window = win.wait_in_game()
         bounds = None
-    LOG.info("已待命，等待開局。")
+    else:
+        window = window or win.open_game()
+        bounds = None
+    LOG.info("等待開局。F8 可隨時停止。")
     started = time.monotonic()
-    deadline = started + 30
+    deadline = started + (180 if automatic else 30)
     previous = last_move_board = None
     previous_flames = set()
     moves = 0
@@ -278,6 +283,9 @@ def play(dry_run, manual=False):
     last_timer_seen = None
     away = False
     region = None
+    menus = MenuButtons() if automatic else None
+    last_button_time = 0
+    pending_button = None
     with Capture() as capture:
         while time.monotonic() < deadline:
             win.check()
@@ -295,6 +303,26 @@ def play(dry_run, manual=False):
             if bounds is None:
                 search = win.window_region(window, capture.monitors[0])
                 screen = capture.grab(search)
+                if menus is not None:
+                    button = menus.find(screen)
+                    if button is not None:
+                        name, point = button
+                        now = time.monotonic()
+                        stable_button = (
+                            pending_button is not None and name == pending_button[0]
+                            and max(abs(a-b) for a,b in zip(point, pending_button[1])) <= 3
+                        )
+                        if stable_button and now - last_button_time > 2:
+                            position = (search["left"] + point[0], search["top"] + point[1])
+                            if win.click(window, position):
+                                LOG.info("已自動按下 %s。", name)
+                                last_button_time = now
+                                pending_button = None
+                        else:
+                            pending_button = button
+                        time.sleep(0.12)
+                        continue
+                    pending_button = None
                 location = find_board(screen)
                 if location is None:
                     time.sleep(0.08)
@@ -360,8 +388,9 @@ def play(dry_run, manual=False):
                 raise ValueError("六秒內沒有找到可執行的走法。請確認框選範圍。")
             time.sleep(0.035)
     if last_timer_seen is None:
-        raise ValueError("待命 30 秒仍未找到棋盤和時間條。請保持棋盤完整可見，並在開局前先按 F2。")
+        raise ValueError("等待逾時，未找到完整棋盤。請確認遊戲已載入、畫面完整可見，或使用 --wait-key 手動開局。")
     LOG.info("本輪已停止。送出 %d 次交換，分數請查看遊戲結算畫面。", moves)
+    return window
 
 
 def configure_log():
@@ -383,6 +412,8 @@ def main():
     parser = argparse.ArgumentParser(description="Bejeweled Blitz 棋盤辨識與自動交換")
     parser.add_argument("--dry-run", action="store_true", help="只列出辨識結果和建議走法")
     parser.add_argument("--manual", action="store_true", help="以 F2 手動框選棋盤")
+    parser.add_argument("--wait-key", action="store_true", help="按 F2 待命並手動開局")
+    parser.add_argument("--once", action="store_true", help="只玩一局後結束")
     parser.add_argument("--inspect", help="離線讀取一張截圖")
     parser.add_argument("--board", type=int, nargs=4, metavar=("X", "Y", "W", "H"))
     args = parser.parse_args()
@@ -409,7 +440,9 @@ def main():
         return 0
     configure_log()
     try:
-        play(args.dry_run, args.manual)
+        window = play(args.dry_run, args.manual, args.wait_key)
+        while not (args.once or args.dry_run or args.manual or args.wait_key):
+            window = play(False, window=window)
     except KeyboardInterrupt:
         LOG.info("已停止。")
     except (OSError, ValueError) as error:
