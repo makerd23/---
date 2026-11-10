@@ -156,6 +156,68 @@ def decide_action(state, lead):
     return action if distance <= state['speed']*60*seconds else 'run'
 
 
+def prepare_window(connection):
+    window = connection.call('Browser.getWindowForTarget')['windowId']
+    for mode in ('fullscreen', 'maximized'):
+        try:
+            current = connection.call('Browser.getWindowBounds', windowId=window)['bounds']
+            if current.get('windowState') != mode:
+                connection.call('Browser.setWindowBounds', windowId=window,
+                                bounds={'windowState': 'normal'})
+                connection.call('Browser.setWindowBounds', windowId=window,
+                                bounds={'windowState': mode})
+            for _ in range(15):
+                current = connection.call('Browser.getWindowBounds', windowId=window)['bounds']
+                if current.get('windowState') == mode:
+                    print('視窗狀態：'+mode, flush=True)
+                    connection.call('Page.bringToFront')
+                    time.sleep(.4)
+                    return
+                time.sleep(.1)
+        except RuntimeError:
+            continue
+    print('此電腦未接受全螢幕或最大化指令，將以目前大小執行。', flush=True)
+    connection.call('Page.bringToFront')
+
+
+def start_game(connection):
+    # Some Windows desktops keep a newly opened page hidden until a native click.
+    connection.call('Emulation.setFocusEmulationEnabled', enabled=True)
+    baseline = connection.evaluate(STATE)['distance']
+    for attempt in range(3):
+        if ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000:
+            raise KeyboardInterrupt
+        connection.call('Page.bringToFront')
+        position = connection.evaluate('''(() => {
+          const canvas=document.querySelector('.runner-canvas');
+          if (!canvas) throw new Error('找不到遊戲畫布');
+          canvas.scrollIntoView({block:'center'});
+          const b=canvas.getBoundingClientRect();
+          return {x:b.x+b.width/2,y:b.y+b.height/2};
+        })()''')
+        connection.call('Input.dispatchMouseEvent', type='mousePressed',
+                        button='left', clickCount=1, **position)
+        connection.call('Input.dispatchMouseEvent', type='mouseReleased',
+                        button='left', clickCount=1, **position)
+        state = connection.evaluate(STATE)
+        # Clicking may set playing without performing the initial jump.
+        if not state['crashed']:
+            connection.call('Input.dispatchKeyEvent', type='keyDown', key=' ', code='Space', windowsVirtualKeyCode=32)
+            time.sleep(.12)
+            connection.call('Input.dispatchKeyEvent', type='keyUp', key=' ', code='Space', windowsVirtualKeyCode=32)
+        for _ in range(40):
+            if ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000:
+                raise KeyboardInterrupt
+            state = connection.evaluate(STATE)
+            if state['playing'] and state['distance'] > baseline+1:
+                return
+            if state['crashed']:
+                raise RuntimeError('啟動確認期間已碰撞，請重新執行。')
+            time.sleep(.1)
+        print('遊戲尚未移動，重新聚焦並啟動（{}/3）。'.format(attempt+1), flush=True)
+    raise RuntimeError('遊戲沒有開始移動；請提供終端機訊息以檢查此電腦的 Chrome 設定。')
+
+
 def main():
     parser = argparse.ArgumentParser(description='自動開啟 Chrome 並操作小恐龍，不需要安裝套件')
     parser.add_argument('--chrome', help='Chrome 執行檔路徑')
@@ -200,9 +262,8 @@ def main():
                 time.sleep(.3)
         if not connection:
             raise RuntimeError('25 秒內無法連接小恐龍；可能是 Chrome 版本或學校政策不允許遠端偵錯。原因：'+repr(last_error))
-        connection.call('Page.bringToFront')
-        connection.call('Input.dispatchKeyEvent', type='keyDown', key=' ', code='Space', windowsVirtualKeyCode=32)
-        connection.call('Input.dispatchKeyEvent', type='keyUp', key=' ', code='Space', windowsVirtualKeyCode=32)
+        prepare_window(connection)
+        start_game(connection)
         print('已自動開始。不需選座標；由 Python 判斷跳躍。', flush=True)
         started = last_report = time.monotonic()
         dead_since = None
