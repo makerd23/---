@@ -37,7 +37,23 @@ def read_board(frame):
                         counts[code] += 1
             ranked = sorted(range(1, 8), key=lambda code: counts[code], reverse=True)
             best, second = ranked[:2]
-            cells.append(best if counts[best] >= 20 and counts[best] - counts[second] >= 11 else None)
+            gem = best if counts[best] >= 20 and counts[best] - counts[second] >= 11 else None
+            if gem is None:
+                # When edge effects split the vote, retry inside the gem body.
+                # Require both a strong central vote and support in the wider sample.
+                core = [0] * 8
+                for y in range(5):
+                    for x in range(5):
+                        px = int((col + 0.36 + x * 0.28 / 4) * frame.width / 8)
+                        py = int((row + 0.36 + y * 0.28 / 4) * frame.height / 8)
+                        code = color_id(frame.pixel(px, py))
+                        if code is not None:
+                            core[code] += 1
+                ranked = sorted(range(1, 8), key=lambda code: core[code], reverse=True)
+                best, second = ranked[:2]
+                if core[best] >= 15 and core[best] - core[second] >= 9 and counts[best] >= 12:
+                    gem = best
+            cells.append(gem)
         rows.append(tuple(cells))
     return tuple(rows)
 

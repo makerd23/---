@@ -3,3 +3,4 @@ __pycache__/
 calibration.json
 *.zip
 wheelhouse/
+blitz-diagnostics/

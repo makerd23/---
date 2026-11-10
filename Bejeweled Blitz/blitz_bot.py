@@ -3,6 +3,7 @@
 import argparse
 import ctypes
 from ctypes import wintypes
+import json
 import logging
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ from menu_buttons import MenuButtons
 SIZE = 8
 COLORS = (1, 2, 3, 4, 5, 6, 7)
 F2, F8 = 0x71, 0x77
+BOT_VERSION = "2026-11-10-recovery"
 LOG = logging.getLogger(__name__)
 LOG_PATH = Path(__file__).with_name("blitz-last-run.log")
 
@@ -62,7 +64,7 @@ def predict_value(board, matches, can_predict_cascades):
     return value
 
 
-def best_move(board, flames=frozenset()):
+def best_move(board, flames=frozenset(), previous=None):
     best = None
     best_value = (-1, -1)
     complete = all(None not in row for row in board)
@@ -80,6 +82,18 @@ def best_move(board, flames=frozenset()):
                 if not any((row, col) in run or (r, c) in run for run in matches):
                     continue
                 source_cell, target_cell = (row, col), (r, c)
+                if previous is not None:
+                    # Only move through a locally settled area. Effects elsewhere
+                    # must not prevent a fully observed, legal match here.
+                    affected = set.union(*matches) | {source_cell, target_cell}
+                    neighborhood = affected | {
+                        (rr + dr, cc + dc)
+                        for rr, cc in affected for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                        if 0 <= rr + dr < SIZE and 0 <= cc + dc < SIZE
+                    }
+                    if any(board[rr][cc] is None or board[rr][cc] != previous[rr][cc]
+                           for rr, cc in neighborhood):
+                        continue
                 moved_flames = {
                     target_cell if cell == source_cell else source_cell if cell == target_cell else cell
                     for cell in flames
@@ -245,6 +259,43 @@ def describe(move):
     return " → ".join(f"第 {r + 1} 列第 {c + 1} 欄" for r, c in move)
 
 
+def save_diagnostics(frame, board, bounds, reason, stalled_seconds):
+    """Save the frame that actually failed, before the game changes again."""
+    unknown_cells = [
+        {"row": r + 1, "column": c + 1}
+        for r, row in enumerate(board) for c, gem in enumerate(row) if gem is None
+    ]
+    if unknown_cells:
+        LOG.warning("無法辨識的位置（由上往下數列、由左往右數欄，從 1 開始）：%s",
+                  "、".join(f"第 {cell['row']} 列第 {cell['column']} 欄" for cell in unknown_cells))
+    directory = LOG_PATH.parent / "blitz-diagnostics" / (
+        time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
+    )
+    try:
+        directory.mkdir(parents=True, exist_ok=False)
+        left, top, width, height = bounds
+        frame.crop(0, 0, width, height).save_png(directory / "board.png")
+        frame.save_png(directory / "capture.png")
+        report = {
+            "reason": reason,
+            "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "stalled_seconds": round(stalled_seconds, 3),
+            "bounds": dict(left=left, top=top, width=width, height=height),
+            "unknown_cells": unknown_cells,
+            "board": board,
+            "legend": {"1": "紅", "2": "橘", "3": "黃", "4": "綠", "5": "藍", "6": "紫", "7": "白", "null": "無法辨識"},
+        }
+        (directory / "details.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as error:
+        LOG.warning("無法儲存棋盤診斷圖片：%s；原本的停止原因仍會顯示。", error)
+        return None
+    LOG.info("已保存辨識受阻時的棋盤：%s", (directory / "board.png").resolve())
+    LOG.info("時間條截圖與格子資料存於：%s", directory.resolve())
+    return directory
+
+
 def calibrate(win):
     LOG.info("切到 Chrome 的 Bejeweled Blitz。指向棋盤左上角，按 F2。")
     window = win.wait_in_game()
@@ -286,6 +337,9 @@ def play(dry_run, manual=False, wait_key=False, window=None):
     menus = MenuButtons() if automatic else None
     last_button_time = 0
     pending_button = None
+    diagnostic_saved = False
+    last_stall_notice = started
+    recovering = False
     with Capture() as capture:
         while time.monotonic() < deadline:
             win.check()
@@ -360,9 +414,10 @@ def play(dry_run, manual=False, wait_key=False, window=None):
             confirmed_flames = flames & previous_flames
             previous_flames = flames
             unknown = sum(row.count(None) for row in board)
-            readable = unknown <= 2 and not runs(board)
-            if readable and board == previous and board != last_move_board:
-                move = best_move(board, confirmed_flames)
+            # Unknown gems may be ignored outside the move's stable neighborhood.
+            readable = unknown <= 16 and not runs(board)
+            if readable and previous is not None and board != last_move_board:
+                move = best_move(board, confirmed_flames, previous)
                 if move is not None:
                     if dry_run:
                         print_board(board, confirmed_flames)
@@ -379,13 +434,23 @@ def play(dry_run, manual=False, wait_key=False, window=None):
                         LOG.debug("第 %d 次交換 %s；火焰格 %s；編號棋盤 %s", moves, describe(move), sorted(confirmed_flames), board)
                     last_move_board = board
                     idle_since = time.monotonic()
+                    if recovering:
+                        LOG.info("已找到穩定且可辨識的走法，繼續交換。")
+                        recovering = False
             previous = board if readable else None
-            if not dry_run and now - idle_since > 6:
+            if not dry_run and now - idle_since > 6 and now - last_stall_notice > 6:
                 if board == last_move_board:
-                    raise ValueError("已送出交換，但六秒後棋盤仍相同。請確認遊戲仍在進行。")
-                if unknown > 2:
-                    raise ValueError(f"棋盤有 {unknown} 格無法辨識。請確認棋盤完整可見並重新框選。")
-                raise ValueError("六秒內沒有找到可執行的走法。請確認框選範圍。")
+                    reason = "已送出交換，但六秒後棋盤仍相同。請確認遊戲仍在進行。"
+                elif unknown > 2:
+                    reason = f"棋盤有 {unknown} 格暫時無法辨識。"
+                else:
+                    reason = "六秒內沒有找到可執行的走法。請確認框選範圍。"
+                if not diagnostic_saved:
+                    save_diagnostics(frame, board, bounds, reason, now - idle_since)
+                    diagnostic_saved = True
+                LOG.warning("%s 持續重新擷取，等待可確認的走法；F8 可停止。", reason)
+                last_stall_notice = now
+                recovering = True
             time.sleep(0.035)
     if last_timer_seen is None:
         raise ValueError("等待逾時，未找到完整棋盤。請確認遊戲已載入、畫面完整可見，或使用 --wait-key 手動開局。")
@@ -439,6 +504,7 @@ def main():
             print(f"建議交換 {describe(move)}" if move else "沒有找到合法交換。")
         return 0
     configure_log()
+    LOG.info("版本 %s：中央取色、局部穩定交換、辨識失敗自動重試。", BOT_VERSION)
     try:
         window = play(args.dry_run, args.manual, args.wait_key)
         while not (args.once or args.dry_run or args.manual or args.wait_key):

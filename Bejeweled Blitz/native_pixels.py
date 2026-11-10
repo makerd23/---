@@ -2,6 +2,8 @@
 
 import ctypes as ct
 from ctypes import wintypes as wt
+import struct
+import zlib
 
 
 class BitmapInfo(ct.Structure):
@@ -29,6 +31,27 @@ class Frame:
         if min(x, y) < 0 or min(width, height) <= 0 or x + width > self.width or y + height > self.height:
             raise ValueError("擷取範圍超出圖片。")
         return Frame(self.data, width, height, self.stride, self.offset + y * self.stride + x * 4)
+
+    def save_png(self, path):
+        """Save the exact RGB pixels, including cropped frames, without extra packages."""
+        def chunk(kind, data):
+            return (struct.pack(">I", len(data)) + kind + data
+                    + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+        rows = bytearray()
+        for y in range(self.height):
+            start = self.offset + y * self.stride
+            bgra = self.data[start:start + self.width * 4]
+            rgb = bytearray(self.width * 3)
+            rgb[0::3], rgb[1::3], rgb[2::3] = bgra[2::4], bgra[1::4], bgra[0::4]
+            rows.append(0)  # PNG filter: none.
+            rows.extend(rgb)
+        header = struct.pack(">IIBBBBB", self.width, self.height, 8, 2, 0, 0, 0)
+        with open(path, "wb") as output:
+            output.write(b"\x89PNG\r\n\x1a\n")
+            output.write(chunk(b"IHDR", header))
+            output.write(chunk(b"IDAT", zlib.compress(bytes(rows))))
+            output.write(chunk(b"IEND", b""))
 
 
 class Capture:
